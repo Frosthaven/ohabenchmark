@@ -151,7 +151,7 @@ fn draw_url_panel(
     let left_margin = 140i32; // Space for error % y-axis
     let right_margin = 140i32; // Space for p99 y-axis
     let top_margin = 50i32; // Space for URL title
-    let bottom_margin = 100i32; // Space for per-plot labels + business scale labels
+    let bottom_margin = 110i32; // Space for per-plot labels (rate + p99 + error) + business scale labels
     let side_padding = 40i32; // Padding from edge of image
 
     let chart_width = total_width as i32 - left_margin - right_margin - (side_padding * 2);
@@ -313,23 +313,11 @@ fn draw_url_panel(
     )?;
 
     // Draw per-plot-point x-axis labels (using this URL's target rates)
-    let target_rates: Vec<f64> = url_result
-        .results
-        .iter()
-        .map(|r| r.target_rate as f64)
-        .collect();
     let plot_labels_y = chart_bottom + 15;
-    draw_plot_point_labels(
-        root,
-        chart_left,
-        chart_right,
-        plot_labels_y,
-        x_range,
-        &target_rates,
-    )?;
+    draw_plot_point_labels(root, chart_left, chart_right, plot_labels_y, x_range, &data)?;
 
-    // Draw business scale labels below the plot point labels
-    let business_scale_y = chart_bottom + 31;
+    // Draw business scale labels below the plot point labels (rate + p99 + error rate)
+    let business_scale_y = chart_bottom + 60;
     draw_business_scales(root, chart_left, chart_right, business_scale_y, x_range)?;
 
     Ok(())
@@ -765,24 +753,34 @@ fn format_latency_short(ms: f64) -> String {
     }
 }
 
-/// Draw per-plot-point req/s labels below the chart
+/// Draw per-plot-point req/s labels below the chart with p99 and error rate values
 fn draw_plot_point_labels(
     root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
     chart_left: i32,
     chart_right: i32,
     label_y: i32,
     x_range: &std::ops::Range<f64>,
-    actual_rates: &[f64],
+    data: &[(f64, f64, f64)], // (target_rate, error_rate, p99_latency_ms)
 ) -> Result<()> {
     let chart_width = (chart_right - chart_left) as f64;
     let x_size = x_range.end - x_range.start;
 
-    // Use BLACK to match the even tick labels above
-    let label_style = TextStyle::from(("sans-serif", 16).into_font())
+    // Rate label style (black)
+    let rate_label_style = TextStyle::from(("sans-serif", 16).into_font())
         .color(&BLACK)
         .pos(Pos::new(HPos::Center, VPos::Top));
 
-    for &rate in actual_rates {
+    // P99 label style (blue)
+    let p99_label_style = TextStyle::from(("sans-serif", 14).into_font())
+        .color(&P99_COLOR)
+        .pos(Pos::new(HPos::Center, VPos::Top));
+
+    // Error rate label style (red)
+    let error_label_style = TextStyle::from(("sans-serif", 14).into_font())
+        .color(&ERROR_COLOR)
+        .pos(Pos::new(HPos::Center, VPos::Top));
+
+    for &(rate, error_rate, p99_ms) in data {
         if rate < x_range.start || rate > x_range.end {
             continue;
         }
@@ -790,14 +788,41 @@ fn draw_plot_point_labels(
         // Calculate x position
         let x = chart_left + (((rate - x_range.start) / x_size) * chart_width) as i32;
 
-        // Format the label - always whole numbers
-        let label = if rate >= 1000.0 {
+        // Format the rate label - always whole numbers
+        let rate_label = if rate >= 1000.0 {
             format!("{:.0}k", rate / 1000.0)
         } else {
             format!("{:.0}", rate)
         };
 
-        root.draw(&Text::new(label, (x, label_y), label_style.clone()))?;
+        // Draw rate label
+        root.draw(&Text::new(
+            rate_label,
+            (x, label_y),
+            rate_label_style.clone(),
+        ))?;
+
+        // Draw p99 value below rate (always shown)
+        let p99_label = format_latency_short(p99_ms);
+        root.draw(&Text::new(
+            p99_label,
+            (x, label_y + 16),
+            p99_label_style.clone(),
+        ))?;
+
+        // Draw error rate below p99 (only if > 0)
+        if error_rate > 0.0 {
+            let error_label = if error_rate < 10.0 {
+                format!("{:.1}%", error_rate)
+            } else {
+                format!("{:.0}%", error_rate)
+            };
+            root.draw(&Text::new(
+                error_label,
+                (x, label_y + 30),
+                error_label_style.clone(),
+            ))?;
+        }
     }
 
     Ok(())
