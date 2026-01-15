@@ -78,7 +78,7 @@ pub struct Args {
     pub max_error_rate: f64,
 
     /// Maximum p99 latency (ms) before breaking
-    #[arg(long, default_value = "3000")]
+    #[arg(long, default_value = "5000")]
     pub max_p99: u32,
 
     /// Warmup duration in seconds (0 to disable)

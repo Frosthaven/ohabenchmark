@@ -2,33 +2,50 @@ use anyhow::Result;
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
+use crate::analysis::StepStatus;
 use crate::output::UrlBenchmarkResults;
 
-/// Color palette for different URLs (visually distinct colors)
-const COLORS: &[RGBColor] = &[
-    RGBColor(59, 130, 246), // Blue
-    RGBColor(239, 68, 68),  // Red
-    RGBColor(34, 197, 94),  // Green
-    RGBColor(168, 85, 247), // Purple
-    RGBColor(249, 115, 22), // Orange
-    RGBColor(236, 72, 153), // Pink
-    RGBColor(20, 184, 166), // Teal
-    RGBColor(234, 179, 8),  // Yellow
+/// Error rate line color (red)
+const ERROR_COLOR: RGBColor = RGBColor(239, 68, 68);
+
+/// P99 latency line color (blue)
+const P99_COLOR: RGBColor = RGBColor(59, 130, 246);
+
+/// Very light grid/outline color
+const LIGHT_GRID: RGBColor = RGBColor(230, 230, 230);
+
+/// Error rate threshold lines (percentage, label, color)
+const ERROR_THRESHOLDS: &[(f64, &str, RGBColor)] = &[
+    (0.1, "0.1% (Payment)", RGBColor(34, 197, 94)), // Green
+    (0.5, "0.5% (Core)", RGBColor(34, 197, 94)),    // Green
+    (1.0, "1% (APIs)", RGBColor(234, 179, 8)),      // Yellow
+    (2.0, "2% (Non-critical)", RGBColor(249, 115, 22)), // Orange
 ];
 
-/// Threshold lines for error rates (ordered from strictest to most lenient for display)
-const THRESHOLDS: &[(f64, &str, RGBColor)] = &[
-    (2.0, "Non-critical", RGBColor(249, 115, 22)), // Orange
-    (1.0, "APIs", RGBColor(234, 179, 8)),          // Yellow
-    (0.5, "Core App", RGBColor(34, 197, 94)),      // Green
-    (0.1, "Payment", RGBColor(34, 197, 94)),       // Green
+/// Max acceptable p99 latency threshold in milliseconds (3 seconds)
+const P99_MAX_ACCEPTABLE_MS: f64 = 3000.0;
+
+/// Business scale categories (min_rate, max_rate, label)
+const BUSINESS_SCALES: &[(f64, f64, &str)] = &[
+    (1.0, 5.0, "Internal"),
+    (5.0, 20.0, "Local"),
+    (20.0, 100.0, "Regional"),
+    (100.0, 1000.0, "National"),
+    (1000.0, f64::MAX, "Global"),
 ];
 
-/// Generate a PNG graph showing error rate vs requests/second for all URLs
+/// Color for business scale indicators (matches subtitle)
+const SCALE_COLOR: RGBColor = RGBColor(100, 100, 100);
+
+/// Generate a PNG graph showing stacked panels for each URL with error rate and p99 latency
 pub fn generate_error_rate_graph(
     url_results: &[UrlBenchmarkResults],
     output_path: &str,
 ) -> Result<()> {
+    if url_results.is_empty() {
+        return Ok(());
+    }
+
     // Create parent directories if they don't exist
     if let Some(parent) = std::path::Path::new(output_path).parent() {
         if !parent.as_os_str().is_empty() {
@@ -36,213 +53,912 @@ pub fn generate_error_rate_graph(
         }
     }
 
-    let width = 1200u32;
-    let height = 700u32;
+    let num_urls = url_results.len();
+    let width = 2400u32; // 2x size
+                         // Dynamic height: 440px per panel + 140px for title/subtitle + 140px for x-axis/scales/legend
+    let panel_height = 440u32;
+    let header_height = 140u32;
+    let footer_height = 140u32; // For: even ticks + per-plot labels + business scale labels + "Requests/Second" + legend
+    let height = header_height + (panel_height * num_urls as u32) + footer_height;
 
     let root = BitMapBackend::new(output_path, (width, height)).into_drawing_area();
     root.fill(&WHITE)?;
 
-    // Calculate axis ranges from all data
-    let (_min_rate, max_rate, max_error_rate) = calculate_ranges(url_results);
+    // Calculate shared x-axis range from all data
+    let (_, x_max) = calculate_x_range(url_results);
+    let x_range = 0.0..(x_max * 1.05);
 
-    // Add some padding to the ranges
-    let x_range = 0f64..(max_rate * 1.05);
-    let y_range = 0f64..(max_error_rate * 1.1).max(5.0); // At least show 0-5% range
+    // Calculate shared y-axis ranges for normalized comparison across all URLs
+    let (error_y_range, p99_y_range) = calculate_shared_y_ranges(url_results);
 
-    let mut chart = ChartBuilder::on(&root)
-        .caption(
-            "Error Rate vs Requests/Second",
-            ("sans-serif", 28).into_font(),
-        )
-        .margin(20)
-        .x_label_area_size(50)
-        .y_label_area_size(60)
-        .build_cartesian_2d(x_range.clone(), y_range.clone())?;
+    // Draw main title
+    let title_style = TextStyle::from(("sans-serif", 48).into_font())
+        .color(&BLACK)
+        .pos(Pos::new(HPos::Center, VPos::Top));
+    root.draw(&Text::new(
+        "Error Rate & P99 Latency vs Requests/Second",
+        ((width / 2) as i32, 24),
+        title_style,
+    ))?;
 
-    chart
-        .configure_mesh()
-        .x_desc("Requests/Second")
-        .y_desc("Error Rate (%)")
-        .x_label_style(("sans-serif", 16))
-        .y_label_style(("sans-serif", 16))
-        .axis_desc_style(("sans-serif", 18))
-        .light_line_style(RGBColor(230, 230, 230))
-        .draw()?;
+    // Draw subtitle with business scale ranges
+    let subtitle_style = TextStyle::from(("sans-serif", 20).into_font())
+        .color(&RGBColor(100, 100, 100))
+        .pos(Pos::new(HPos::Center, VPos::Top));
+    let subtitle = format_business_scale_subtitle();
+    root.draw(&Text::new(
+        subtitle,
+        ((width / 2) as i32, 80),
+        subtitle_style,
+    ))?;
 
-    // Draw threshold lines (without labels - labels are in the legend box)
-    let x_max = max_rate * 1.05;
-    let y_max = (max_error_rate * 1.1).max(5.0);
-    for &(threshold, _label, color) in THRESHOLDS {
-        // Only draw if threshold is within visible range
-        if threshold < y_max {
-            // Draw dashed horizontal line (thin)
-            let dashed_style = ShapeStyle {
-                color: color.mix(0.7).to_rgba(),
-                filled: false,
-                stroke_width: 1,
-            };
-
-            // Create dashed line by drawing segments
-            let dash_len = x_max / 80.0;
-            let gap_len = x_max / 160.0;
-            let mut x = 0.0;
-            while x < x_max {
-                let x_end = (x + dash_len).min(x_max);
-                chart.draw_series(LineSeries::new(
-                    vec![(x, threshold), (x_end, threshold)],
-                    dashed_style.clone(),
-                ))?;
-                x += dash_len + gap_len;
-            }
-        }
-    }
-
-    // Plot each URL's data
+    // Draw each URL panel with shared y-axis ranges for comparison
     for (i, url_result) in url_results.iter().enumerate() {
-        let color = COLORS[i % COLORS.len()];
-        let label = shorten_url(&url_result.url);
-
-        // Collect data points: (actual_rate, error_rate)
-        let data: Vec<(f64, f64)> = url_result
-            .results
-            .iter()
-            .map(|r| (r.actual_rate, r.error_rate))
-            .collect();
-
-        if data.is_empty() {
-            continue;
-        }
-
-        // Draw translucent filled area under the line
-        let fill_color = color.mix(0.15);
-        chart.draw_series(AreaSeries::new(data.clone(), 0.0, fill_color))?;
-
-        // Draw the line
-        chart
-            .draw_series(LineSeries::new(data.clone(), color.stroke_width(2)))?
-            .label(&label)
-            .legend(move |(x, y)| {
-                PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2))
-            });
-
-        // Draw smaller points on the line
-        chart.draw_series(
-            data.iter()
-                .map(|(x, y)| Circle::new((*x, *y), 3, color.filled())),
+        draw_url_panel(
+            &root,
+            i,
+            num_urls,
+            panel_height,
+            header_height,
+            width,
+            url_result,
+            &x_range,
+            &error_y_range,
+            &p99_y_range,
         )?;
     }
 
-    // Draw legend
-    chart
-        .configure_series_labels()
-        .background_style(WHITE.mix(0.9))
-        .border_style(BLACK.stroke_width(1))
-        .label_font(("sans-serif", 14))
-        .position(SeriesLabelPosition::UpperLeft)
-        .margin(10)
-        .draw()?;
+    // Calculate chart boundaries for scale indicators
+    let side_padding = 40i32;
+    let left_margin = 140i32;
+    let right_margin = 140i32;
+    let chart_left = side_padding + left_margin;
+    let chart_width = width as i32 - left_margin - right_margin - (side_padding * 2);
+    let chart_right = chart_left + chart_width;
+    let last_panel_bottom = (header_height + panel_height * num_urls as u32) as i32;
 
-    // Draw threshold legend box below the URL legend
-    // Estimate URL legend height: ~22px per entry + padding
-    let url_count = url_results.len();
-    let url_legend_height_px = 20 + (url_count as i32 * 22);
+    // Collect all unique target rate values from all URLs for per-plot-point labels
+    let mut target_rates: Vec<f64> = url_results
+        .iter()
+        .flat_map(|ur| ur.results.iter().map(|r| r.target_rate as f64))
+        .collect();
+    target_rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    target_rates.dedup_by(|a, b| (*a - *b).abs() < 0.1);
 
-    // Convert pixel offset to data coordinates (approximate)
-    // The chart area is roughly height - margins, y_max maps to top
-    let chart_height_px = height as f64 - 70.0 - 50.0; // minus top margin/caption and bottom label area
-    let chart_width_px = width as f64 - 60.0 - 20.0; // minus y_label_area and right margin
-    let px_per_unit_y = chart_height_px / y_max;
-    let px_per_unit_x = chart_width_px / x_max;
-    let url_legend_offset = (url_legend_height_px as f64 + 20.0) / px_per_unit_y;
+    // Vertical layout below chart:
+    // Row 1: Even tick marks (already drawn on last panel at chart_bottom + 6)
+    // Row 2: Per-plot-point labels (tighter spacing - cut gap in half)
+    // Row 3: Business scale labels
+    let plot_labels_y = last_panel_bottom + 17;
+    let business_scale_y = last_panel_bottom + 39;
 
-    // Position threshold legend below URL legend
-    // URL legend is at margin=10 from chart edge, so ~10px from left of chart area
-    let legend_y_start = y_max - url_legend_offset;
-    let line_height = y_max * 0.045;
-    let line_width = x_max * 0.025;
-    // Align with URL legend: 10px margin from chart area left edge
-    let legend_x = 10.0 / px_per_unit_x;
+    // Draw per-plot-point req/s labels (using target rates)
+    draw_plot_point_labels(
+        &root,
+        chart_left,
+        chart_right,
+        plot_labels_y,
+        &x_range,
+        &target_rates,
+    )?;
 
-    // Draw background box
-    // URL legend with entries like "sbltn.com", "eidexgroup.com" is ~150px wide
-    // Threshold entries like "< 2% Non-critical" are similar length
-    let box_width = 150.0 / px_per_unit_x;
-    let box_height = line_height * 5.8;
-    let box_x = legend_x - 5.0 / px_per_unit_x; // 5px padding left of legend_x
-    let box_y = legend_y_start + line_height * 0.3;
+    // Draw business scale indicators
+    draw_business_scales(&root, chart_left, chart_right, business_scale_y, &x_range)?;
 
-    chart.draw_series(std::iter::once(Rectangle::new(
-        [(box_x, box_y), (box_x + box_width, box_y - box_height)],
-        ShapeStyle {
-            color: WHITE.mix(0.9).to_rgba(),
-            filled: true,
-            stroke_width: 0,
-        },
-    )))?;
-    chart.draw_series(std::iter::once(Rectangle::new(
-        [(box_x, box_y), (box_x + box_width, box_y - box_height)],
-        ShapeStyle {
-            color: BLACK.to_rgba(),
-            filled: false,
-            stroke_width: 1,
-        },
-    )))?;
-
-    // Title
-    let title_style = TextStyle::from(("sans-serif", 12).into_font())
+    // Draw shared x-axis label at bottom
+    let x_label_style = TextStyle::from(("sans-serif", 32).into_font())
         .color(&BLACK)
-        .pos(Pos::new(HPos::Left, VPos::Top));
-    chart.draw_series(std::iter::once(Text::new(
-        "Error Rate Thresholds",
-        (legend_x, legend_y_start),
-        title_style,
-    )))?;
+        .pos(Pos::new(HPos::Center, VPos::Top));
+    root.draw(&Text::new(
+        "Requests/Second",
+        ((width / 2) as i32, (height - 80) as i32),
+        x_label_style,
+    ))?;
 
-    // Draw each threshold entry (sorted green to orange in THRESHOLDS)
-    for (i, &(threshold, label, color)) in THRESHOLDS.iter().enumerate() {
-        let y_pos = legend_y_start - line_height * (i as f64 + 1.2);
-
-        // Draw colored line segment
-        let line_style = ShapeStyle {
-            color: color.to_rgba(),
-            filled: false,
-            stroke_width: 2,
-        };
-        chart.draw_series(LineSeries::new(
-            vec![(legend_x, y_pos), (legend_x + line_width, y_pos)],
-            line_style,
-        ))?;
-
-        // Draw label text
-        let label_text = format!("< {}% {}", threshold, label);
-        let text_style = TextStyle::from(("sans-serif", 11).into_font())
-            .color(&BLACK)
-            .pos(Pos::new(HPos::Left, VPos::Center));
-        chart.draw_series(std::iter::once(Text::new(
-            label_text,
-            (legend_x + line_width + x_max * 0.008, y_pos),
-            text_style,
-        )))?;
-    }
+    // Draw legend at the bottom
+    draw_legend(&root, width, height)?;
 
     root.present()?;
 
     Ok(())
 }
 
-/// Calculate the axis ranges from all results
-fn calculate_ranges(url_results: &[UrlBenchmarkResults]) -> (f64, f64, f64) {
+/// Draw a single URL panel with dual y-axes
+fn draw_url_panel(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    panel_index: usize,
+    _total_panels: usize,
+    panel_height: u32,
+    header_height: u32,
+    total_width: u32,
+    url_result: &UrlBenchmarkResults,
+    x_range: &std::ops::Range<f64>,
+    error_y_range: &std::ops::Range<f64>,
+    p99_y_range: &std::ops::Range<f64>,
+) -> Result<()> {
+    let y_offset = header_height as i32 + (panel_index as u32 * panel_height) as i32;
+
+    // Panel margins (2x)
+    let left_margin = 140i32; // Space for error % y-axis
+    let right_margin = 140i32; // Space for p99 y-axis
+    let top_margin = 50i32; // Space for URL title
+    let bottom_margin = 60i32; // Space for x-axis ticks
+    let side_padding = 40i32; // Padding from edge of image
+
+    let chart_width = total_width as i32 - left_margin - right_margin - (side_padding * 2);
+    let chart_height = panel_height as i32 - top_margin - bottom_margin;
+
+    // Adjust positions with side padding
+    let chart_left = side_padding + left_margin;
+    let chart_right = chart_left + chart_width;
+    let chart_top = y_offset + top_margin;
+    let chart_bottom = y_offset + top_margin + chart_height;
+
+    // Draw URL title
+    let url_label = shorten_url(&url_result.url);
+    let url_style = TextStyle::from(("sans-serif", 28).into_font())
+        .color(&BLACK)
+        .pos(Pos::new(HPos::Left, VPos::Top));
+    root.draw(&Text::new(
+        url_label,
+        (chart_left + 10, y_offset + 10),
+        url_style,
+    ))?;
+
+    // Draw grid lines (very light)
+    draw_grid_lines(root, chart_left, chart_right, chart_top, chart_bottom)?;
+
+    // Draw business scale vertical divider lines
+    draw_scale_dividers(
+        root,
+        chart_left,
+        chart_right,
+        chart_top,
+        chart_bottom,
+        x_range,
+    )?;
+
+    // Draw error rate threshold lines
+    draw_threshold_lines(
+        root,
+        chart_left,
+        chart_right,
+        chart_top,
+        chart_bottom,
+        &error_y_range,
+    )?;
+
+    // Draw p99 latency threshold line (3 seconds)
+    draw_p99_threshold_line(
+        root,
+        chart_left,
+        chart_right,
+        chart_top,
+        chart_bottom,
+        &p99_y_range,
+    )?;
+
+    // Collect data points using target_rate for x-axis, excluding the last point if it's a terminal (failure) status
+    let mut data: Vec<(f64, f64, f64)> = url_result
+        .results
+        .iter()
+        .map(|r| (r.target_rate as f64, r.error_rate, r.p99_latency_ms))
+        .collect();
+
+    // Check if last analysis is a terminal status (failure) - if so, exclude it from the graph
+    if let Some(last_analysis) = url_result.analyses.last() {
+        let is_terminal = matches!(
+            last_analysis.status,
+            StepStatus::Break
+                | StepStatus::RateLimited
+                | StepStatus::Blocked
+                | StepStatus::Hung
+                | StepStatus::Gone
+        );
+        if is_terminal && data.len() > 1 {
+            data.pop();
+        }
+    }
+
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    // Draw error rate line and points (left y-axis, red)
+    draw_data_line(
+        root,
+        &data
+            .iter()
+            .map(|(x, err, _)| (*x, *err))
+            .collect::<Vec<_>>(),
+        x_range,
+        &error_y_range,
+        chart_left,
+        chart_right,
+        chart_top,
+        chart_bottom,
+        ERROR_COLOR,
+    )?;
+
+    // Draw p99 latency line and points (right y-axis, blue)
+    draw_data_line(
+        root,
+        &data
+            .iter()
+            .map(|(x, _, p99)| (*x, *p99))
+            .collect::<Vec<_>>(),
+        x_range,
+        &p99_y_range,
+        chart_left,
+        chart_right,
+        chart_top,
+        chart_bottom,
+        P99_COLOR,
+    )?;
+
+    // Draw left y-axis (error rate %)
+    draw_y_axis_left(
+        root,
+        chart_left,
+        chart_top,
+        chart_bottom,
+        &error_y_range,
+        ERROR_COLOR,
+        side_padding,
+    )?;
+
+    // Draw right y-axis (p99 latency ms)
+    draw_y_axis_right(
+        root,
+        chart_right,
+        chart_top,
+        chart_bottom,
+        &p99_y_range,
+        P99_COLOR,
+        total_width as i32 - side_padding,
+    )?;
+
+    // Draw x-axis ticks
+    draw_x_axis_ticks(root, chart_left, chart_right, chart_bottom, x_range)?;
+
+    Ok(())
+}
+
+/// Draw grid lines (horizontal only - vertical lines are drawn by scale dividers)
+fn draw_grid_lines(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+) -> Result<()> {
+    let grid_style = ShapeStyle {
+        color: LIGHT_GRID.to_rgba(),
+        filled: false,
+        stroke_width: 1,
+    };
+
+    // Horizontal grid lines only (5 lines)
+    for i in 0..=4 {
+        let y = top + (bottom - top) * i / 4;
+        root.draw(&PathElement::new(
+            vec![(left, y), (right, y)],
+            grid_style.clone(),
+        ))?;
+    }
+
+    Ok(())
+}
+
+/// Draw solid vertical divider lines at business scale boundaries
+fn draw_scale_dividers(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+    x_range: &std::ops::Range<f64>,
+) -> Result<()> {
+    let chart_width = (right - left) as f64;
+    let x_size = x_range.end - x_range.start;
+
+    // Collect all boundary points from business scales
+    let mut boundaries: Vec<f64> = Vec::new();
+    for &(min_rate, max_rate, _) in BUSINESS_SCALES {
+        if min_rate > x_range.start && min_rate < x_range.end {
+            boundaries.push(min_rate);
+        }
+        if max_rate != f64::MAX && max_rate > x_range.start && max_rate < x_range.end {
+            if !boundaries.contains(&max_rate) {
+                boundaries.push(max_rate);
+            }
+        }
+    }
+
+    // Draw solid vertical lines at each boundary
+    let line_style = ShapeStyle {
+        color: SCALE_COLOR.mix(0.5).to_rgba(),
+        filled: false,
+        stroke_width: 1,
+    };
+
+    for boundary in boundaries {
+        let x = left + (((boundary - x_range.start) / x_size) * chart_width) as i32;
+
+        // Draw solid vertical line
+        root.draw(&PathElement::new(
+            vec![(x, top), (x, bottom)],
+            line_style.clone(),
+        ))?;
+    }
+
+    Ok(())
+}
+
+/// Draw error rate threshold dashed lines
+fn draw_threshold_lines(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+    error_range: &std::ops::Range<f64>,
+) -> Result<()> {
+    let chart_height = (bottom - top) as f64;
+    let range_size = error_range.end - error_range.start;
+
+    for &(threshold, _label, color) in ERROR_THRESHOLDS {
+        // Only draw if threshold is within visible range
+        if threshold >= error_range.start && threshold < error_range.end {
+            // Convert threshold to y pixel position
+            let y_ratio = (threshold - error_range.start) / range_size;
+            let y = bottom - (y_ratio * chart_height) as i32;
+
+            // Draw dashed line
+            let dash_style = ShapeStyle {
+                color: color.mix(0.6).to_rgba(),
+                filled: false,
+                stroke_width: 2,
+            };
+
+            let dash_len = 16i32;
+            let gap_len = 8i32;
+            let mut x = left;
+            while x < right {
+                let x_end = (x + dash_len).min(right);
+                root.draw(&PathElement::new(
+                    vec![(x, y), (x_end, y)],
+                    dash_style.clone(),
+                ))?;
+                x += dash_len + gap_len;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Draw p99 latency max acceptable threshold line (dotted, blue)
+fn draw_p99_threshold_line(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+    p99_range: &std::ops::Range<f64>,
+) -> Result<()> {
+    let chart_height = (bottom - top) as f64;
+    let range_size = p99_range.end - p99_range.start;
+
+    // Only draw if threshold is within visible range
+    if P99_MAX_ACCEPTABLE_MS >= p99_range.start && P99_MAX_ACCEPTABLE_MS < p99_range.end {
+        // Convert threshold to y pixel position
+        let y_ratio = (P99_MAX_ACCEPTABLE_MS - p99_range.start) / range_size;
+        let y = bottom - (y_ratio * chart_height) as i32;
+
+        // Draw dotted line (shorter dashes than error thresholds)
+        let dash_style = ShapeStyle {
+            color: P99_COLOR.mix(0.6).to_rgba(),
+            filled: false,
+            stroke_width: 2,
+        };
+
+        let dash_len = 8i32;
+        let gap_len = 8i32;
+        let mut x = left;
+        while x < right {
+            let x_end = (x + dash_len).min(right);
+            root.draw(&PathElement::new(
+                vec![(x, y), (x_end, y)],
+                dash_style.clone(),
+            ))?;
+            x += dash_len + gap_len;
+        }
+    }
+
+    Ok(())
+}
+
+/// Draw a data line with points and translucent area fill
+fn draw_data_line(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    data: &[(f64, f64)],
+    x_range: &std::ops::Range<f64>,
+    y_range: &std::ops::Range<f64>,
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+    color: RGBColor,
+) -> Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let chart_width = (right - left) as f64;
+    let chart_height = (bottom - top) as f64;
+    let x_size = x_range.end - x_range.start;
+    let y_size = y_range.end - y_range.start;
+
+    // Convert data points to pixel coordinates
+    let points: Vec<(i32, i32)> = data
+        .iter()
+        .map(|(x, y)| {
+            let px = left + (((*x - x_range.start) / x_size) * chart_width) as i32;
+            let py = bottom - (((*y - y_range.start) / y_size) * chart_height) as i32;
+            (px, py)
+        })
+        .collect();
+
+    // Draw translucent area fill below the line
+    if points.len() >= 2 {
+        let fill_color = color.mix(0.15); // Very translucent
+        let mut area_points: Vec<(i32, i32)> = Vec::new();
+
+        // Start from bottom-left of first point
+        area_points.push((points[0].0, bottom));
+
+        // Add all line points
+        for &pt in &points {
+            area_points.push(pt);
+        }
+
+        // Go down to bottom at last point
+        area_points.push((points[points.len() - 1].0, bottom));
+
+        // Close the polygon
+        area_points.push((points[0].0, bottom));
+
+        root.draw(&Polygon::new(area_points, fill_color.filled()))?;
+    }
+
+    // Draw line connecting points
+    let line_style = ShapeStyle {
+        color: color.to_rgba(),
+        filled: false,
+        stroke_width: 4,
+    };
+
+    for i in 0..points.len().saturating_sub(1) {
+        root.draw(&PathElement::new(
+            vec![points[i], points[i + 1]],
+            line_style.clone(),
+        ))?;
+    }
+
+    // Draw points
+    for &(px, py) in &points {
+        root.draw(&Circle::new((px, py), 8, color.filled()))?;
+    }
+
+    Ok(())
+}
+
+/// Draw left y-axis with labels
+fn draw_y_axis_left(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    chart_left: i32,
+    top: i32,
+    bottom: i32,
+    range: &std::ops::Range<f64>,
+    color: RGBColor,
+    side_padding: i32,
+) -> Result<()> {
+    let label_style = TextStyle::from(("sans-serif", 22).into_font())
+        .color(&color)
+        .pos(Pos::new(HPos::Right, VPos::Center));
+
+    let chart_height = (bottom - top) as f64;
+    let range_size = range.end - range.start;
+
+    // Draw 5 tick labels
+    for i in 0..=4 {
+        let ratio = i as f64 / 4.0;
+        let value = range.start + ratio * range_size;
+        let y = bottom - (ratio * chart_height) as i32;
+
+        let label = if value < 10.0 {
+            format!("{:.1}%", value)
+        } else {
+            format!("{:.0}%", value)
+        };
+
+        root.draw(&Text::new(label, (chart_left - 10, y), label_style.clone()))?;
+    }
+
+    // Draw axis label - "Error %"
+    let axis_label_style = TextStyle::from(("sans-serif", 24).into_font())
+        .color(&color)
+        .pos(Pos::new(HPos::Center, VPos::Center));
+
+    let mid_y = (top + bottom) / 2;
+    root.draw(&Text::new(
+        "Error %",
+        (side_padding + 10, mid_y),
+        axis_label_style,
+    ))?;
+
+    Ok(())
+}
+
+/// Draw right y-axis with labels
+fn draw_y_axis_right(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    chart_right: i32,
+    top: i32,
+    bottom: i32,
+    range: &std::ops::Range<f64>,
+    color: RGBColor,
+    right_edge: i32,
+) -> Result<()> {
+    let label_style = TextStyle::from(("sans-serif", 22).into_font())
+        .color(&color)
+        .pos(Pos::new(HPos::Left, VPos::Center));
+
+    let chart_height = (bottom - top) as f64;
+    let range_size = range.end - range.start;
+
+    // Draw 5 tick labels
+    for i in 0..=4 {
+        let ratio = i as f64 / 4.0;
+        let value = range.start + ratio * range_size;
+        let y = bottom - (ratio * chart_height) as i32;
+
+        let label = format_latency_short(value);
+        root.draw(&Text::new(
+            label,
+            (chart_right + 10, y),
+            label_style.clone(),
+        ))?;
+    }
+
+    // Draw axis label - "p99"
+    let axis_label_style = TextStyle::from(("sans-serif", 24).into_font())
+        .color(&color)
+        .pos(Pos::new(HPos::Center, VPos::Center));
+
+    let mid_y = (top + bottom) / 2;
+    root.draw(&Text::new(
+        "p99",
+        (right_edge - 30, mid_y),
+        axis_label_style,
+    ))?;
+
+    Ok(())
+}
+
+/// Format latency value for axis labels
+fn format_latency_short(ms: f64) -> String {
+    if ms < 1.0 {
+        format!("{:.0}us", ms * 1000.0)
+    } else if ms < 1000.0 {
+        format!("{:.0}ms", ms)
+    } else {
+        format!("{:.1}s", ms / 1000.0)
+    }
+}
+
+/// Draw x-axis ticks
+fn draw_x_axis_ticks(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    left: i32,
+    right: i32,
+    bottom: i32,
+    x_range: &std::ops::Range<f64>,
+) -> Result<()> {
+    let label_style = TextStyle::from(("sans-serif", 20).into_font())
+        .color(&BLACK)
+        .pos(Pos::new(HPos::Center, VPos::Top));
+
+    let chart_width = (right - left) as f64;
+    let x_size = x_range.end - x_range.start;
+
+    // Draw 5 tick labels
+    for i in 0..=4 {
+        let ratio = i as f64 / 4.0;
+        let value = x_range.start + ratio * x_size;
+        let x = left + (ratio * chart_width) as i32;
+
+        let label = if value >= 1000.0 {
+            format!("{:.1}k", value / 1000.0)
+        } else {
+            format!("{:.0}", value)
+        };
+
+        root.draw(&Text::new(label, (x, bottom + 6), label_style.clone()))?;
+    }
+
+    Ok(())
+}
+
+/// Draw per-plot-point req/s labels below the even ticks
+fn draw_plot_point_labels(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    chart_left: i32,
+    chart_right: i32,
+    label_y: i32,
+    x_range: &std::ops::Range<f64>,
+    actual_rates: &[f64],
+) -> Result<()> {
+    let chart_width = (chart_right - chart_left) as f64;
+    let x_size = x_range.end - x_range.start;
+
+    // Use BLACK to match the even tick labels above
+    let label_style = TextStyle::from(("sans-serif", 16).into_font())
+        .color(&BLACK)
+        .pos(Pos::new(HPos::Center, VPos::Top));
+
+    for &rate in actual_rates {
+        if rate < x_range.start || rate > x_range.end {
+            continue;
+        }
+
+        // Calculate x position
+        let x = chart_left + (((rate - x_range.start) / x_size) * chart_width) as i32;
+
+        // Format the label
+        let label = if rate >= 1000.0 {
+            format!("{:.1}k", rate / 1000.0)
+        } else if rate >= 100.0 {
+            format!("{:.0}", rate)
+        } else {
+            format!("{:.1}", rate)
+        };
+
+        root.draw(&Text::new(label, (x, label_y), label_style.clone()))?;
+    }
+
+    Ok(())
+}
+
+/// Draw business scale indicators below the chart
+fn draw_business_scales(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    chart_left: i32,
+    chart_right: i32,
+    label_y: i32,
+    x_range: &std::ops::Range<f64>,
+) -> Result<()> {
+    let chart_width = (chart_right - chart_left) as f64;
+    let x_size = x_range.end - x_range.start;
+
+    let label_style = TextStyle::from(("sans-serif", 18).into_font())
+        .color(&SCALE_COLOR)
+        .pos(Pos::new(HPos::Center, VPos::Top));
+
+    for &(min_rate, max_rate, label) in BUSINESS_SCALES {
+        // Skip if this scale is entirely outside our x-range
+        if min_rate >= x_range.end {
+            continue;
+        }
+        if max_rate != f64::MAX && max_rate <= x_range.start {
+            continue;
+        }
+
+        // Clamp to visible range
+        let visible_min = min_rate.max(x_range.start);
+        let visible_max = if max_rate == f64::MAX {
+            x_range.end
+        } else {
+            max_rate.min(x_range.end)
+        };
+
+        // Skip if range is too small to be meaningful
+        if visible_max <= visible_min {
+            continue;
+        }
+
+        // Convert to pixel positions
+        let x_start = chart_left + (((visible_min - x_range.start) / x_size) * chart_width) as i32;
+        let x_end = chart_left + (((visible_max - x_range.start) / x_size) * chart_width) as i32;
+
+        // Skip if the rendered width is too small for the label
+        let min_width = 80i32;
+        if x_end - x_start < min_width {
+            continue;
+        }
+
+        // Draw label centered in the category range
+        let label_x = (x_start + x_end) / 2;
+        root.draw(&Text::new(label, (label_x, label_y), label_style.clone()))?;
+    }
+
+    Ok(())
+}
+
+/// Draw legend at the bottom of the chart
+fn draw_legend(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let legend_y = (height - 40) as i32;
+    let left_x = 60i32;
+
+    // Left side: Error rate and p99 legend items
+    let error_line_start = left_x;
+    root.draw(&PathElement::new(
+        vec![
+            (error_line_start, legend_y),
+            (error_line_start + 40, legend_y),
+        ],
+        ERROR_COLOR.stroke_width(4),
+    ))?;
+
+    let label_style = TextStyle::from(("sans-serif", 22).into_font())
+        .color(&BLACK)
+        .pos(Pos::new(HPos::Left, VPos::Center));
+    root.draw(&Text::new(
+        "Error Rate",
+        (error_line_start + 50, legend_y),
+        label_style.clone(),
+    ))?;
+
+    // P99 latency legend item with threshold (next to error rate)
+    let p99_line_start = left_x + 240;
+    root.draw(&PathElement::new(
+        vec![(p99_line_start, legend_y), (p99_line_start + 40, legend_y)],
+        P99_COLOR.stroke_width(4),
+    ))?;
+
+    root.draw(&Text::new(
+        "p99 Latency",
+        (p99_line_start + 50, legend_y),
+        label_style,
+    ))?;
+
+    // P99 threshold legend item (dotted line + "3s max")
+    let p99_threshold_start = left_x + 440;
+    let dash_style = ShapeStyle {
+        color: P99_COLOR.mix(0.6).to_rgba(),
+        filled: false,
+        stroke_width: 4,
+    };
+    // Draw dotted line (3 dots)
+    root.draw(&PathElement::new(
+        vec![
+            (p99_threshold_start, legend_y),
+            (p99_threshold_start + 8, legend_y),
+        ],
+        dash_style.clone(),
+    ))?;
+    root.draw(&PathElement::new(
+        vec![
+            (p99_threshold_start + 16, legend_y),
+            (p99_threshold_start + 24, legend_y),
+        ],
+        dash_style.clone(),
+    ))?;
+    root.draw(&PathElement::new(
+        vec![
+            (p99_threshold_start + 32, legend_y),
+            (p99_threshold_start + 40, legend_y),
+        ],
+        dash_style,
+    ))?;
+
+    let threshold_text_style = TextStyle::from(("sans-serif", 20).into_font())
+        .color(&P99_COLOR)
+        .pos(Pos::new(HPos::Left, VPos::Center));
+    root.draw(&Text::new(
+        "3s max acceptable",
+        (p99_threshold_start + 50, legend_y),
+        threshold_text_style,
+    ))?;
+
+    // Right side: Threshold lines with their descriptions
+    // Layout: [--- 0.1% Payment] [--- 0.5% Core] [--- 1% APIs] [--- 2% Non-critical]
+    let threshold_label_style = TextStyle::from(("sans-serif", 20).into_font())
+        .color(&RGBColor(80, 80, 80))
+        .pos(Pos::new(HPos::Left, VPos::Center));
+
+    let right_x = (width - 60) as i32;
+    let mut x_pos = right_x;
+
+    // Draw thresholds right-to-left so they end at right edge
+    // Reverse order: 2%, 1%, 0.5%, 0.1%
+    let thresholds_reversed: Vec<_> = ERROR_THRESHOLDS.iter().rev().collect();
+
+    for &(threshold, label, color) in &thresholds_reversed {
+        // Format: "X% Label"
+        let text = format!(
+            "{}% {}",
+            threshold,
+            label
+                .split('(')
+                .nth(1)
+                .unwrap_or(label)
+                .trim_end_matches(')')
+        );
+        let text_width = (text.len() as i32) * 12; // Approximate width (2x)
+        let line_width = 30i32;
+        let spacing = 30i32;
+
+        // Draw label (right-aligned)
+        let label_x = x_pos - text_width;
+        root.draw(&Text::new(
+            text,
+            (label_x, legend_y),
+            threshold_label_style.clone(),
+        ))?;
+
+        // Draw dashed line segment before label
+        let line_end = label_x - 10;
+        let line_start = line_end - line_width;
+
+        // Draw dashed line (3 small dashes)
+        let dash_style = ShapeStyle {
+            color: color.to_rgba(),
+            filled: false,
+            stroke_width: 4,
+        };
+        root.draw(&PathElement::new(
+            vec![(line_start, legend_y), (line_start + 8, legend_y)],
+            dash_style.clone(),
+        ))?;
+        root.draw(&PathElement::new(
+            vec![(line_start + 12, legend_y), (line_start + 20, legend_y)],
+            dash_style.clone(),
+        ))?;
+        root.draw(&PathElement::new(
+            vec![(line_start + 24, legend_y), (line_end, legend_y)],
+            dash_style,
+        ))?;
+
+        x_pos = line_start - spacing;
+    }
+
+    // Add "Acceptable Error Rates" heading centered above threshold items
+    let leftmost_x = x_pos + 30; // Adjust for the last spacing subtracted
+    let heading_center_x = (leftmost_x + right_x) / 2;
+    let heading_y = legend_y - 28;
+
+    let heading_style = TextStyle::from(("sans-serif", 18).into_font())
+        .color(&RGBColor(120, 120, 120))
+        .pos(Pos::new(HPos::Center, VPos::Center));
+
+    root.draw(&Text::new(
+        "Acceptable Error Rates",
+        (heading_center_x, heading_y),
+        heading_style,
+    ))?;
+
+    Ok(())
+}
+
+/// Calculate the x-axis range (req/s) from all results
+/// Uses target rate data range with small padding for better visualization
+fn calculate_x_range(url_results: &[UrlBenchmarkResults]) -> (f64, f64) {
     let mut min_rate = f64::MAX;
     let mut max_rate = 0f64;
-    let mut max_error_rate = 0f64;
 
     for url_result in url_results {
         for result in &url_result.results {
-            if result.actual_rate > 0.0 {
-                min_rate = min_rate.min(result.actual_rate);
-                max_rate = max_rate.max(result.actual_rate);
+            let rate = result.target_rate as f64;
+            if rate > 0.0 {
+                min_rate = min_rate.min(rate);
+                max_rate = max_rate.max(rate);
             }
-            max_error_rate = max_error_rate.max(result.error_rate);
         }
     }
 
@@ -250,10 +966,47 @@ fn calculate_ranges(url_results: &[UrlBenchmarkResults]) -> (f64, f64, f64) {
         min_rate = 0.0;
     }
 
-    (min_rate, max_rate, max_error_rate)
+    // Just use the target max with a small padding - no need to extend to full scale boundaries
+    // The 1.05 multiplier in the main function adds 5% padding
+
+    // Return both but we use 0 for start
+    (min_rate, max_rate)
 }
 
-/// Shorten a URL for legend display
+/// Calculate y-axis ranges for a single URL result
+fn calculate_y_ranges(url_result: &UrlBenchmarkResults) -> (f64, f64) {
+    let mut max_error_rate = 0f64;
+    let mut max_p99 = 0f64;
+
+    for result in &url_result.results {
+        max_error_rate = max_error_rate.max(result.error_rate);
+        max_p99 = max_p99.max(result.p99_latency_ms);
+    }
+
+    (max_error_rate, max_p99)
+}
+
+/// Calculate shared y-axis ranges across all URL results for normalized comparison
+fn calculate_shared_y_ranges(
+    url_results: &[UrlBenchmarkResults],
+) -> (std::ops::Range<f64>, std::ops::Range<f64>) {
+    let mut max_error_rate = 0f64;
+    let mut max_p99 = 0f64;
+
+    for url_result in url_results {
+        let (err, p99) = calculate_y_ranges(url_result);
+        max_error_rate = max_error_rate.max(err);
+        max_p99 = max_p99.max(p99);
+    }
+
+    // Apply padding and minimum values
+    let error_y_range = 0f64..(max_error_rate * 1.2).max(3.0);
+    let p99_y_range = 0f64..(max_p99 * 1.2).max(100.0);
+
+    (error_y_range, p99_y_range)
+}
+
+/// Shorten a URL for display
 fn shorten_url(url: &str) -> String {
     let url = url
         .trim_start_matches("https://")
@@ -263,9 +1016,50 @@ fn shorten_url(url: &str) -> String {
     let url = url.trim_end_matches('/');
 
     // If URL is still too long, truncate with ellipsis
-    if url.len() > 40 {
-        format!("{}...", &url[..37])
+    if url.len() > 60 {
+        format!("{}...", &url[..57])
     } else {
         url.to_string()
     }
+}
+
+/// Format a rate value with shorthand (k for thousands, etc.)
+fn format_rate_short(rate: f64) -> String {
+    if rate >= 1000.0 {
+        let k = rate / 1000.0;
+        if k >= 100.0 {
+            format!("{:.0}k", k)
+        } else if k >= 10.0 {
+            let s = format!("{:.1}", k);
+            format!("{}k", s.trim_end_matches('0').trim_end_matches('.'))
+        } else {
+            let s = format!("{:.1}", k);
+            format!("{}k", s.trim_end_matches('0').trim_end_matches('.'))
+        }
+    } else if rate >= 100.0 {
+        format!("{:.0}", rate)
+    } else if rate >= 10.0 {
+        let s = format!("{:.1}", rate);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        let s = format!("{:.1}", rate);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// Generate the subtitle with business scale ranges
+fn format_business_scale_subtitle() -> String {
+    let parts: Vec<String> = BUSINESS_SCALES
+        .iter()
+        .map(|&(min, max, name)| {
+            let max_str = if max == f64::MAX {
+                "+".to_string()
+            } else {
+                format!("-{}", format_rate_short(max))
+            };
+            format!("{} {}{}", name, format_rate_short(min), max_str)
+        })
+        .collect();
+
+    format!("Classed by {}", parts.join(" | "))
 }

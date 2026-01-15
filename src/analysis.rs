@@ -12,6 +12,7 @@ pub enum StepStatus {
     RateLimited,
     Blocked,
     Hung,
+    Gone,
 }
 
 impl std::fmt::Display for StepStatus {
@@ -23,6 +24,7 @@ impl std::fmt::Display for StepStatus {
             StepStatus::RateLimited => write!(f, "RATE"),
             StepStatus::Blocked => write!(f, "BLOCK"),
             StepStatus::Hung => write!(f, "HANG"),
+            StepStatus::Gone => write!(f, "GONE"),
         }
     }
 }
@@ -36,6 +38,7 @@ pub enum BreakReason {
     P99Latency(f64),
     ThroughputDegradation(f64), // actual rate vs target rate percentage
     Hung,                       // Server stopped responding
+    NoResponses,                // No successful responses received
     None,
 }
 
@@ -58,6 +61,7 @@ impl std::fmt::Display for BreakReason {
                 write!(f, "Throughput degradation ({:.1}% of target)", pct)
             }
             BreakReason::Hung => write!(f, "Server stopped responding"),
+            BreakReason::NoResponses => write!(f, "No successful responses received"),
             BreakReason::None => write!(f, ""),
         }
     }
@@ -100,7 +104,11 @@ pub fn generate_summary(
     for (i, analysis) in analyses.iter().enumerate() {
         let is_terminal = matches!(
             analysis.status,
-            StepStatus::Break | StepStatus::RateLimited | StepStatus::Blocked | StepStatus::Hung
+            StepStatus::Break
+                | StepStatus::RateLimited
+                | StepStatus::Blocked
+                | StepStatus::Hung
+                | StepStatus::Gone
         );
 
         if is_terminal {
@@ -167,6 +175,15 @@ pub fn analyze_result(result: &BenchmarkResult, thresholds: &ThresholdConfig) ->
         return AnalysisResult {
             status: StepStatus::Hung,
             break_reason: BreakReason::Hung,
+        };
+    }
+
+    // Check if no successful responses were received (all latency values are 0)
+    // This indicates complete failure - server didn't respond to any requests
+    if result.p99_latency_ms == 0.0 && result.avg_latency_ms == 0.0 && result.actual_rate > 0.0 {
+        return AnalysisResult {
+            status: StepStatus::Gone,
+            break_reason: BreakReason::NoResponses,
         };
     }
 

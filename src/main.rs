@@ -199,6 +199,7 @@ fn run_benchmark_suite(config: &BenchmarkConfig, state: &mut SessionState) -> Re
                     | StepStatus::RateLimited
                     | StepStatus::Blocked
                     | StepStatus::Hung
+                    | StepStatus::Gone
             );
             results.push(result);
             analyses.push(analysis);

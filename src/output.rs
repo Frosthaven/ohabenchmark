@@ -117,6 +117,7 @@ pub fn print_result_row(result: &BenchmarkResult, analysis: &AnalysisResult) {
         StepStatus::RateLimited => "RATE",
         StepStatus::Blocked => "BLOCK",
         StepStatus::Hung => "HANG",
+        StepStatus::Gone => "GONE",
     };
 
     let status_padded = format!("{:>6}", status_text);
@@ -124,9 +125,11 @@ pub fn print_result_row(result: &BenchmarkResult, analysis: &AnalysisResult) {
     let status_str = match analysis.status {
         StepStatus::Ok => style(status_padded).green().to_string(),
         StepStatus::Warning => style(status_padded).yellow().to_string(),
-        StepStatus::Break | StepStatus::RateLimited | StepStatus::Blocked | StepStatus::Hung => {
-            style(status_padded).red().bold().to_string()
-        }
+        StepStatus::Break
+        | StepStatus::RateLimited
+        | StepStatus::Blocked
+        | StepStatus::Hung
+        | StepStatus::Gone => style(status_padded).red().bold().to_string(),
     };
 
     let error_rate_padded = format!("{:>8.2}%", result.error_rate);
@@ -251,17 +254,21 @@ pub fn print_legend() {
     println!();
     println!("{}", style("Status Codes:").cyan().bold());
     println!(
-        "  {} = under threshold    {} = approaching threshold",
+        "  {}    = under threshold      {} = approaching threshold",
         style("OK").green(),
         style("WARN").yellow()
     );
     println!(
-        "  {} = server breaking    {} = rate limited (429)   {} = blocked (403)",
+        "  {} = server breaking      {} = rate limited (429)",
         style("BREAK").red(),
-        style("RATE").red(),
-        style("BLOCK").red()
+        style("RATE").red()
     );
-    println!("  {} = server hung (timed out)", style("HANG").red());
+    println!(
+        "  {} = blocked (403)        {} = no responses received",
+        style("BLOCK").red(),
+        style("GONE").red()
+    );
+    println!("  {}  = server hung (timed out)", style("HANG").red());
     println!();
     println!(
         "{}",
@@ -414,6 +421,7 @@ pub fn generate_report_text(
                 StepStatus::RateLimited => "RATE",
                 StepStatus::Blocked => "BLOCK",
                 StepStatus::Hung => "HANG",
+                StepStatus::Gone => "GONE",
             };
 
             writeln!(
@@ -539,9 +547,10 @@ pub fn generate_report_text(
     .unwrap();
     writeln!(
         report,
-        "  BLOCK = blocked by WAF (403)   HANG  = server hung (timed out)"
+        "  BLOCK = blocked (403)        GONE  = no responses received"
     )
     .unwrap();
+    writeln!(report, "  HANG  = server hung (timed out)").unwrap();
     writeln!(report).unwrap();
     writeln!(report, "Expected Error Rates by Service Type:").unwrap();
     writeln!(report, "  Payment/Checkout:         < 0.1%").unwrap();
