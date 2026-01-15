@@ -1059,6 +1059,9 @@ fn calculate_shared_y_ranges(
     let error_cap = 50.0_f64.min(thresholds.max_error_rate);
     let p99_cap = 4000.0_f64.min(thresholds.max_p99_ms as f64);
 
+    // Ensure p99 cap is at least 10% above the threshold line so it's always visible
+    let p99_cap = p99_cap.max(P99_MAX_ACCEPTABLE_MS * 1.1);
+
     let error_y_range = 0f64..error_cap;
     let p99_y_range = 0f64..p99_cap;
 
