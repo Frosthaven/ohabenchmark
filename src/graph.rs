@@ -11,6 +11,9 @@ const ERROR_COLOR: RGBColor = RGBColor(239, 68, 68);
 /// P99 latency line color (blue)
 const P99_COLOR: RGBColor = RGBColor(59, 130, 246);
 
+/// P99 threshold exceeded color (purple)
+const P99_THRESHOLD_COLOR: RGBColor = RGBColor(147, 51, 234);
+
 /// Very light grid/outline color
 const LIGHT_GRID: RGBColor = RGBColor(230, 230, 230);
 
@@ -258,36 +261,34 @@ fn draw_url_panel(
         return Ok(());
     }
 
-    // Draw error rate line and points (left y-axis, red)
-    draw_data_line(
+    // Draw error rate line and points (left y-axis, red) - only visible near non-zero points
+    draw_error_data_line(
         root,
         &data
             .iter()
             .map(|(x, err, _)| (*x, *err))
             .collect::<Vec<_>>(),
         x_range,
-        &error_y_range,
+        error_y_range,
         chart_left,
         chart_right,
         chart_top,
         chart_bottom,
-        ERROR_COLOR,
     )?;
 
-    // Draw p99 latency line and points (right y-axis, blue)
-    draw_data_line(
+    // Draw p99 latency line and points (right y-axis, blue/purple based on threshold)
+    draw_p99_data_line(
         root,
         &data
             .iter()
             .map(|(x, _, p99)| (*x, *p99))
             .collect::<Vec<_>>(),
         x_range,
-        &p99_y_range,
+        p99_y_range,
         chart_left,
         chart_right,
         chart_top,
         chart_bottom,
-        P99_COLOR,
     )?;
 
     // Draw left y-axis (error rate %)
@@ -469,7 +470,7 @@ fn draw_p99_threshold_line(
 
         // Draw dotted line (shorter dashes than error thresholds)
         let dash_style = ShapeStyle {
-            color: P99_COLOR.mix(0.6).to_rgba(),
+            color: P99_THRESHOLD_COLOR.mix(0.6).to_rgba(),
             filled: false,
             stroke_width: 2,
         };
@@ -490,17 +491,17 @@ fn draw_p99_threshold_line(
     Ok(())
 }
 
-/// Draw a data line with points and translucent area fill
-fn draw_data_line(
+/// Draw p99 latency line with threshold-based coloring
+/// Points and segments turn purple when above the 3s threshold
+fn draw_p99_data_line(
     root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
-    data: &[(f64, f64)],
+    data: &[(f64, f64)], // (x, p99_ms)
     x_range: &std::ops::Range<f64>,
     y_range: &std::ops::Range<f64>,
     left: i32,
     right: i32,
     top: i32,
     bottom: i32,
-    color: RGBColor,
 ) -> Result<()> {
     if data.is_empty() {
         return Ok(());
@@ -511,55 +512,164 @@ fn draw_data_line(
     let x_size = x_range.end - x_range.start;
     let y_size = y_range.end - y_range.start;
 
-    // Convert data points to pixel coordinates
-    let points: Vec<(i32, i32)> = data
+    // Convert data points to pixel coordinates, keeping track of original values
+    let points: Vec<((i32, i32), f64)> = data
         .iter()
         .map(|(x, y)| {
             let px = left + (((*x - x_range.start) / x_size) * chart_width) as i32;
             let py = bottom - (((*y - y_range.start) / y_size) * chart_height) as i32;
-            (px, py)
+            ((px, py), *y)
         })
         .collect();
 
-    // Draw translucent area fill below the line
+    // Draw translucent area fill below the line (use blue for the fill)
     if points.len() >= 2 {
-        let fill_color = color.mix(0.15); // Very translucent
+        let fill_color = P99_COLOR.mix(0.15);
         let mut area_points: Vec<(i32, i32)> = Vec::new();
 
-        // Start from bottom-left of first point
-        area_points.push((points[0].0, bottom));
-
-        // Add all line points
-        for &pt in &points {
+        area_points.push((points[0].0 .0, bottom));
+        for &(pt, _) in &points {
             area_points.push(pt);
         }
-
-        // Go down to bottom at last point
-        area_points.push((points[points.len() - 1].0, bottom));
-
-        // Close the polygon
-        area_points.push((points[0].0, bottom));
+        area_points.push((points[points.len() - 1].0 .0, bottom));
+        area_points.push((points[0].0 .0, bottom));
 
         root.draw(&Polygon::new(area_points, fill_color.filled()))?;
     }
 
-    // Draw line connecting points
+    // Draw line segments with color based on whether either endpoint exceeds threshold
+    for i in 0..points.len().saturating_sub(1) {
+        let (pt1, val1) = points[i];
+        let (pt2, val2) = points[i + 1];
+
+        // Use purple if either endpoint is above threshold
+        let color = if val1 >= P99_MAX_ACCEPTABLE_MS || val2 >= P99_MAX_ACCEPTABLE_MS {
+            P99_THRESHOLD_COLOR
+        } else {
+            P99_COLOR
+        };
+
+        let line_style = ShapeStyle {
+            color: color.to_rgba(),
+            filled: false,
+            stroke_width: 4,
+        };
+
+        root.draw(&PathElement::new(vec![pt1, pt2], line_style))?;
+    }
+
+    // Draw points with color based on whether they exceed threshold
+    for &((px, py), val) in &points {
+        let color = if val >= P99_MAX_ACCEPTABLE_MS {
+            P99_THRESHOLD_COLOR
+        } else {
+            P99_COLOR
+        };
+        root.draw(&Circle::new((px, py), 8, color.filled()))?;
+    }
+
+    Ok(())
+}
+
+/// Draw error rate line, only showing segments adjacent to non-zero points
+fn draw_error_data_line(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
+    data: &[(f64, f64)], // (x, error_rate)
+    x_range: &std::ops::Range<f64>,
+    y_range: &std::ops::Range<f64>,
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+) -> Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let chart_width = (right - left) as f64;
+    let chart_height = (bottom - top) as f64;
+    let x_size = x_range.end - x_range.start;
+    let y_size = y_range.end - y_range.start;
+
+    // Convert data points to pixel coordinates, keeping track of original values
+    let points: Vec<((i32, i32), f64)> = data
+        .iter()
+        .map(|(x, y)| {
+            let px = left + (((*x - x_range.start) / x_size) * chart_width) as i32;
+            let py = bottom - (((*y - y_range.start) / y_size) * chart_height) as i32;
+            ((px, py), *y)
+        })
+        .collect();
+
+    // Determine which points are "visible" (non-zero or adjacent to non-zero)
+    let mut visible: Vec<bool> = vec![false; points.len()];
+    for i in 0..points.len() {
+        if points[i].1 > 0.0 {
+            visible[i] = true;
+            // Also mark adjacent points as visible
+            if i > 0 {
+                visible[i - 1] = true;
+            }
+            if i + 1 < points.len() {
+                visible[i + 1] = true;
+            }
+        }
+    }
+
+    // Draw translucent area fill only for visible segments
+    if points.len() >= 2 {
+        let fill_color = ERROR_COLOR.mix(0.15);
+
+        // Find contiguous visible segments and draw area for each
+        let mut i = 0;
+        while i < points.len() {
+            if visible[i] {
+                // Start of a visible segment
+                let start = i;
+                while i < points.len() && visible[i] {
+                    i += 1;
+                }
+                let end = i;
+
+                if end - start >= 2 {
+                    let mut area_points: Vec<(i32, i32)> = Vec::new();
+                    area_points.push((points[start].0 .0, bottom));
+                    for j in start..end {
+                        area_points.push(points[j].0);
+                    }
+                    area_points.push((points[end - 1].0 .0, bottom));
+                    area_points.push((points[start].0 .0, bottom));
+
+                    root.draw(&Polygon::new(area_points, fill_color.filled()))?;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    // Draw line segments only where both endpoints are visible
     let line_style = ShapeStyle {
-        color: color.to_rgba(),
+        color: ERROR_COLOR.to_rgba(),
         filled: false,
         stroke_width: 4,
     };
 
     for i in 0..points.len().saturating_sub(1) {
-        root.draw(&PathElement::new(
-            vec![points[i], points[i + 1]],
-            line_style.clone(),
-        ))?;
+        if visible[i] && visible[i + 1] {
+            root.draw(&PathElement::new(
+                vec![points[i].0, points[i + 1].0],
+                line_style.clone(),
+            ))?;
+        }
     }
 
-    // Draw points
-    for &(px, py) in &points {
-        root.draw(&Circle::new((px, py), 8, color.filled()))?;
+    // Draw points only for visible points
+    for i in 0..points.len() {
+        if visible[i] {
+            let (px, py) = points[i].0;
+            root.draw(&Circle::new((px, py), 8, ERROR_COLOR.filled()))?;
+        }
     }
 
     Ok(())
@@ -808,7 +918,7 @@ fn draw_legend(
     // P99 threshold legend item (dotted line + "3s max")
     let p99_threshold_start = left_x + 440;
     let dash_style = ShapeStyle {
-        color: P99_COLOR.mix(0.6).to_rgba(),
+        color: P99_THRESHOLD_COLOR.mix(0.6).to_rgba(),
         filled: false,
         stroke_width: 4,
     };
@@ -836,7 +946,7 @@ fn draw_legend(
     ))?;
 
     let threshold_text_style = TextStyle::from(("sans-serif", 20).into_font())
-        .color(&P99_COLOR)
+        .color(&P99_THRESHOLD_COLOR)
         .pos(Pos::new(HPos::Left, VPos::Center));
     root.draw(&Text::new(
         "3s max acceptable",
