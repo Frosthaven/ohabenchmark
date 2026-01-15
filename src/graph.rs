@@ -2,7 +2,7 @@ use anyhow::Result;
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
-use crate::analysis::StepStatus;
+use crate::analysis::{BreakReason, StepStatus};
 use crate::output::UrlBenchmarkResults;
 
 /// Error rate line color (red)
@@ -200,10 +200,26 @@ fn draw_url_panel(
         .color(&BLACK)
         .pos(Pos::new(HPos::Left, VPos::Top));
     root.draw(&Text::new(
-        url_label,
+        url_label.clone(),
         (chart_left + 10, y_offset + 10),
         url_style,
     ))?;
+
+    // Draw termination status in red if test ended early
+    if let Some(status_text) = format_termination_status(url_result) {
+        // Approximate width of URL label (rough estimate: 10px per char for 28pt font)
+        let url_width = (url_label.len() as i32) * 14;
+        let status_x = chart_left + 10 + url_width + 20; // 20px gap after URL
+
+        let status_style = TextStyle::from(("sans-serif", 28).into_font())
+            .color(&ERROR_COLOR)
+            .pos(Pos::new(HPos::Left, VPos::Top));
+        root.draw(&Text::new(
+            status_text,
+            (status_x, y_offset + 10),
+            status_style,
+        ))?;
+    }
 
     // Draw grid lines (very light)
     draw_grid_lines(root, chart_left, chart_right, chart_top, chart_bottom)?;
@@ -1044,6 +1060,33 @@ fn format_rate_short(rate: f64) -> String {
     } else {
         let s = format!("{:.1}", rate);
         s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// Format termination status for display on the chart
+/// Returns None if the test completed normally (no early termination)
+fn format_termination_status(url_result: &UrlBenchmarkResults) -> Option<String> {
+    let last_analysis = url_result.analyses.last()?;
+
+    match last_analysis.status {
+        StepStatus::Break => {
+            let reason = match &last_analysis.break_reason {
+                BreakReason::ErrorRate(rate) => format!("Error Rate ({:.1}%)", rate),
+                BreakReason::P99Latency(ms) => format!("P99 Latency ({:.0}ms)", ms),
+                BreakReason::ThroughputDegradation(pct) => {
+                    format!("Throughput Degradation ({:.0}%)", pct)
+                }
+                BreakReason::Hung => "Server Hung".to_string(),
+                BreakReason::NoResponses => "No Responses".to_string(),
+                _ => "Threshold Exceeded".to_string(),
+            };
+            Some(format!("BREAK: {}", reason))
+        }
+        StepStatus::RateLimited => Some("RATE LIMITED".to_string()),
+        StepStatus::Blocked => Some("BLOCKED".to_string()),
+        StepStatus::Hung => Some("CONNECTION HUNG".to_string()),
+        StepStatus::Gone => Some("NO RESPONSE".to_string()),
+        StepStatus::Ok | StepStatus::Warning => None,
     }
 }
 
