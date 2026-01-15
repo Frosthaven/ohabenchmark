@@ -549,7 +549,7 @@ fn draw_p99_data_line(
 
     // Draw points (always blue)
     for &((px, py), _) in &points {
-        root.draw(&Circle::new((px, py), 8, P99_COLOR.filled()))?;
+        root.draw(&Circle::new((px, py), 4, P99_COLOR.filled()))?;
     }
 
     Ok(())
@@ -652,7 +652,7 @@ fn draw_error_data_line(
     for i in 0..points.len() {
         if visible[i] {
             let (px, py) = points[i].0;
-            root.draw(&Circle::new((px, py), 8, ERROR_COLOR.filled()))?;
+            root.draw(&Circle::new((px, py), 4, ERROR_COLOR.filled()))?;
         }
     }
 
@@ -1052,9 +1052,9 @@ fn calculate_shared_y_ranges(
         max_p99 = max_p99.max(p99);
     }
 
-    // Apply padding and minimum values
-    let error_y_range = 0f64..(max_error_rate * 1.2).max(3.0);
-    let p99_y_range = 0f64..(max_p99 * 1.2).max(100.0);
+    // Fixed y-axis ranges: error rate 0-100%, p99 0-5s
+    let error_y_range = 0f64..100.0;
+    let p99_y_range = 0f64..5000.0;
 
     (error_y_range, p99_y_range)
 }
