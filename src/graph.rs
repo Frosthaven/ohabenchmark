@@ -11,18 +11,15 @@ const ERROR_COLOR: RGBColor = RGBColor(239, 68, 68);
 /// P99 latency line color (blue)
 const P99_COLOR: RGBColor = RGBColor(59, 130, 246);
 
-/// P99 threshold exceeded color (purple)
-const P99_THRESHOLD_COLOR: RGBColor = RGBColor(147, 51, 234);
-
 /// Very light grid/outline color
 const LIGHT_GRID: RGBColor = RGBColor(230, 230, 230);
 
 /// Error rate threshold lines (percentage, label, color)
 const ERROR_THRESHOLDS: &[(f64, &str, RGBColor)] = &[
     (0.1, "0.1% (Payment)", RGBColor(34, 197, 94)), // Green
-    (0.5, "0.5% (Core)", RGBColor(34, 197, 94)),    // Green
+    (0.5, "0.5% (Core)", RGBColor(132, 204, 22)),   // Lime
     (1.0, "1% (APIs)", RGBColor(234, 179, 8)),      // Yellow
-    (2.0, "2% (Non-critical)", RGBColor(249, 115, 22)), // Orange
+    (2.0, "2% (Non-critical)", RGBColor(239, 68, 68)), // Red (same as ERROR_COLOR)
 ];
 
 /// Max acceptable p99 latency threshold in milliseconds (3 seconds)
@@ -470,7 +467,7 @@ fn draw_p99_threshold_line(
 
         // Draw dotted line (shorter dashes than error thresholds)
         let dash_style = ShapeStyle {
-            color: P99_THRESHOLD_COLOR.mix(0.6).to_rgba(),
+            color: P99_COLOR.mix(0.6).to_rgba(),
             filled: false,
             stroke_width: 2,
         };
@@ -537,35 +534,22 @@ fn draw_p99_data_line(
         root.draw(&Polygon::new(area_points, fill_color.filled()))?;
     }
 
-    // Draw line segments with color based on whether either endpoint exceeds threshold
+    // Draw line segments (always blue)
+    let line_style = ShapeStyle {
+        color: P99_COLOR.to_rgba(),
+        filled: false,
+        stroke_width: 4,
+    };
+
     for i in 0..points.len().saturating_sub(1) {
-        let (pt1, val1) = points[i];
-        let (pt2, val2) = points[i + 1];
-
-        // Use purple if either endpoint is above threshold
-        let color = if val1 >= P99_MAX_ACCEPTABLE_MS || val2 >= P99_MAX_ACCEPTABLE_MS {
-            P99_THRESHOLD_COLOR
-        } else {
-            P99_COLOR
-        };
-
-        let line_style = ShapeStyle {
-            color: color.to_rgba(),
-            filled: false,
-            stroke_width: 4,
-        };
-
-        root.draw(&PathElement::new(vec![pt1, pt2], line_style))?;
+        let (pt1, _) = points[i];
+        let (pt2, _) = points[i + 1];
+        root.draw(&PathElement::new(vec![pt1, pt2], line_style.clone()))?;
     }
 
-    // Draw points with color based on whether they exceed threshold
-    for &((px, py), val) in &points {
-        let color = if val >= P99_MAX_ACCEPTABLE_MS {
-            P99_THRESHOLD_COLOR
-        } else {
-            P99_COLOR
-        };
-        root.draw(&Circle::new((px, py), 8, color.filled()))?;
+    // Draw points (always blue)
+    for &((px, py), _) in &points {
+        root.draw(&Circle::new((px, py), 8, P99_COLOR.filled()))?;
     }
 
     Ok(())
@@ -899,7 +883,7 @@ fn draw_legend(
     // P99 threshold legend item (dotted line + "3s max")
     let p99_threshold_start = left_x + 440;
     let dash_style = ShapeStyle {
-        color: P99_THRESHOLD_COLOR.mix(0.6).to_rgba(),
+        color: P99_COLOR.mix(0.6).to_rgba(),
         filled: false,
         stroke_width: 4,
     };
@@ -927,7 +911,7 @@ fn draw_legend(
     ))?;
 
     let threshold_text_style = TextStyle::from(("sans-serif", 20).into_font())
-        .color(&P99_THRESHOLD_COLOR)
+        .color(&P99_COLOR)
         .pos(Pos::new(HPos::Left, VPos::Center));
     root.draw(&Text::new(
         "3s max acceptable",

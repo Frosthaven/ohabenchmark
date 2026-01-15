@@ -192,7 +192,12 @@ fn run_benchmark_suite(config: &BenchmarkConfig, state: &mut SessionState) -> Re
             // Print row
             print_result_row(&result, &analysis);
 
-            // Store results
+            // Store results - fix error_rate for GONE status (100% failure)
+            let mut result = result;
+            if analysis.status == StepStatus::Gone {
+                result.error_rate = 100.0;
+            }
+
             let should_break = matches!(
                 analysis.status,
                 StepStatus::Break
