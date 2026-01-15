@@ -179,7 +179,7 @@ impl Default for ThresholdConfig {
     fn default() -> Self {
         Self {
             max_error_rate: 5.0,
-            max_p99_ms: 5000,
+            max_p99_ms: 3000,
         }
     }
 }

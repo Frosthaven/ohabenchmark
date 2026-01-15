@@ -50,7 +50,7 @@ impl Default for SessionState {
             threads: 4,
             connections: 100,
             max_error_rate: 5.0,
-            max_p99_ms: 5000,
+            max_p99_ms: 3000,
             warmup_idx: 1,
             cooldown_idx: 0,
             save_report: true,
