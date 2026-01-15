@@ -55,10 +55,10 @@ pub fn generate_error_rate_graph(
 
     let num_urls = url_results.len();
     let width = 2400u32; // 2x size
-                         // Dynamic height: 440px per panel + 140px for title/subtitle + 140px for x-axis/scales/legend
-    let panel_height = 440u32;
+                         // Dynamic height: 480px per panel + 140px for title/subtitle + 100px for "Requests/Second" + legend
+    let panel_height = 480u32; // Increased to fit per-plot labels + business scale labels
     let header_height = 140u32;
-    let footer_height = 140u32; // For: even ticks + per-plot labels + business scale labels + "Requests/Second" + legend
+    let footer_height = 100u32; // Just "Requests/Second" label + legend
     let height = header_height + (panel_height * num_urls as u32) + footer_height;
 
     let root = BitMapBackend::new(output_path, (width, height)).into_drawing_area();
@@ -108,43 +108,6 @@ pub fn generate_error_rate_graph(
         )?;
     }
 
-    // Calculate chart boundaries for scale indicators
-    let side_padding = 40i32;
-    let left_margin = 140i32;
-    let right_margin = 140i32;
-    let chart_left = side_padding + left_margin;
-    let chart_width = width as i32 - left_margin - right_margin - (side_padding * 2);
-    let chart_right = chart_left + chart_width;
-    let last_panel_bottom = (header_height + panel_height * num_urls as u32) as i32;
-
-    // Collect all unique target rate values from all URLs for per-plot-point labels
-    let mut target_rates: Vec<f64> = url_results
-        .iter()
-        .flat_map(|ur| ur.results.iter().map(|r| r.target_rate as f64))
-        .collect();
-    target_rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    target_rates.dedup_by(|a, b| (*a - *b).abs() < 0.1);
-
-    // Vertical layout below chart:
-    // Row 1: Even tick marks (already drawn on last panel at chart_bottom + 6)
-    // Row 2: Per-plot-point labels (tighter spacing - cut gap in half)
-    // Row 3: Business scale labels
-    let plot_labels_y = last_panel_bottom + 17;
-    let business_scale_y = last_panel_bottom + 39;
-
-    // Draw per-plot-point req/s labels (using target rates)
-    draw_plot_point_labels(
-        &root,
-        chart_left,
-        chart_right,
-        plot_labels_y,
-        &x_range,
-        &target_rates,
-    )?;
-
-    // Draw business scale indicators
-    draw_business_scales(&root, chart_left, chart_right, business_scale_y, &x_range)?;
-
     // Draw shared x-axis label at bottom
     let x_label_style = TextStyle::from(("sans-serif", 32).into_font())
         .color(&BLACK)
@@ -182,7 +145,7 @@ fn draw_url_panel(
     let left_margin = 140i32; // Space for error % y-axis
     let right_margin = 140i32; // Space for p99 y-axis
     let top_margin = 50i32; // Space for URL title
-    let bottom_margin = 60i32; // Space for x-axis ticks
+    let bottom_margin = 100i32; // Space for per-plot labels + business scale labels
     let side_padding = 40i32; // Padding from edge of image
 
     let chart_width = total_width as i32 - left_margin - right_margin - (side_padding * 2);
@@ -334,8 +297,25 @@ fn draw_url_panel(
         total_width as i32 - side_padding,
     )?;
 
-    // Draw x-axis ticks
-    draw_x_axis_ticks(root, chart_left, chart_right, chart_bottom, x_range)?;
+    // Draw per-plot-point x-axis labels (using this URL's target rates)
+    let target_rates: Vec<f64> = url_result
+        .results
+        .iter()
+        .map(|r| r.target_rate as f64)
+        .collect();
+    let plot_labels_y = chart_bottom + 6;
+    draw_plot_point_labels(
+        root,
+        chart_left,
+        chart_right,
+        plot_labels_y,
+        x_range,
+        &target_rates,
+    )?;
+
+    // Draw business scale labels below the plot point labels
+    let business_scale_y = chart_bottom + 28;
+    draw_business_scales(root, chart_left, chart_right, business_scale_y, x_range)?;
 
     Ok(())
 }
@@ -674,40 +654,7 @@ fn format_latency_short(ms: f64) -> String {
     }
 }
 
-/// Draw x-axis ticks
-fn draw_x_axis_ticks(
-    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
-    left: i32,
-    right: i32,
-    bottom: i32,
-    x_range: &std::ops::Range<f64>,
-) -> Result<()> {
-    let label_style = TextStyle::from(("sans-serif", 20).into_font())
-        .color(&BLACK)
-        .pos(Pos::new(HPos::Center, VPos::Top));
-
-    let chart_width = (right - left) as f64;
-    let x_size = x_range.end - x_range.start;
-
-    // Draw 5 tick labels
-    for i in 0..=4 {
-        let ratio = i as f64 / 4.0;
-        let value = x_range.start + ratio * x_size;
-        let x = left + (ratio * chart_width) as i32;
-
-        let label = if value >= 1000.0 {
-            format!("{:.1}k", value / 1000.0)
-        } else {
-            format!("{:.0}", value)
-        };
-
-        root.draw(&Text::new(label, (x, bottom + 6), label_style.clone()))?;
-    }
-
-    Ok(())
-}
-
-/// Draw per-plot-point req/s labels below the even ticks
+/// Draw per-plot-point req/s labels below the chart
 fn draw_plot_point_labels(
     root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
     chart_left: i32,
