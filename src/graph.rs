@@ -37,6 +37,10 @@ const BUSINESS_SCALES: &[(f64, f64, &str)] = &[
 /// Color for business scale indicators (matches subtitle)
 const SCALE_COLOR: RGBColor = RGBColor(100, 100, 100);
 
+/// DAU estimation constants (users per req/s)
+const DAU_PER_RPS_LOW: f64 = 5_000.0;
+const DAU_PER_RPS_HIGH: f64 = 15_000.0;
+
 /// Generate a PNG graph showing stacked panels for each URL with error rate and p99 latency
 pub fn generate_error_rate_graph(
     url_results: &[UrlBenchmarkResults],
@@ -183,6 +187,17 @@ fn draw_url_panel(
             status_style,
         ))?;
     }
+
+    // Draw DAU estimate (right-aligned on title line)
+    let (dau_estimate, _) = calculate_dau_estimate(url_result);
+    let dau_style = TextStyle::from(("sans-serif", 28).into_font())
+        .color(&SCALE_COLOR)
+        .pos(Pos::new(HPos::Right, VPos::Top));
+    root.draw(&Text::new(
+        dau_estimate,
+        (chart_right - 10, y_offset + 10),
+        dau_style,
+    ))?;
 
     // Draw grid lines (very light)
     draw_grid_lines(root, chart_left, chart_right, chart_top, chart_bottom)?;
@@ -1034,6 +1049,60 @@ fn format_termination_status(url_result: &UrlBenchmarkResults) -> Option<String>
         StepStatus::Hung => Some("CONNECTION HUNG".to_string()),
         StepStatus::Gone => Some("NO RESPONSE".to_string()),
         StepStatus::Ok | StepStatus::Warning => None,
+    }
+}
+
+/// Format a number in shorthand (5k, 1.2M, etc.)
+fn format_short_number(n: f64) -> String {
+    if n >= 1_000_000.0 {
+        format!("{:.1}M", n / 1_000_000.0)
+    } else if n >= 1_000.0 {
+        format!("{:.0}k", n / 1_000.0)
+    } else {
+        format!("{:.0}", n)
+    }
+}
+
+/// Calculate estimated DAU based on max successful rate below p99 threshold
+/// Returns (formatted_string, did_break)
+/// - did_break: true if test terminated early, false if completed all steps
+fn calculate_dau_estimate(url_result: &UrlBenchmarkResults) -> (String, bool) {
+    // Check if test ended with a break/failure status
+    let did_break = url_result.analyses.last().map_or(false, |a| {
+        !matches!(a.status, StepStatus::Ok | StepStatus::Warning)
+    });
+
+    // Find max rate where status is Ok/Warning AND p99 < threshold
+    let max_qualifying_rate: Option<u32> = url_result
+        .results
+        .iter()
+        .zip(url_result.analyses.iter())
+        .filter(|(_, a)| matches!(a.status, StepStatus::Ok | StepStatus::Warning))
+        .filter(|(r, _)| r.p99_latency_ms < P99_MAX_ACCEPTABLE_MS)
+        .map(|(r, _)| r.target_rate)
+        .max();
+
+    match max_qualifying_rate {
+        Some(rate) => {
+            let dau_low = rate as f64 * DAU_PER_RPS_LOW;
+            let dau_high = rate as f64 * DAU_PER_RPS_HIGH;
+
+            let estimate = if did_break {
+                format!(
+                    "~{}-{} DAU",
+                    format_short_number(dau_low),
+                    format_short_number(dau_high)
+                )
+            } else {
+                // Test completed without breaking - show as minimum
+                format!("~{}+ DAU", format_short_number(dau_low))
+            };
+            (estimate, did_break)
+        }
+        None => {
+            // No qualifying rate - endpoint couldn't handle even minimal load
+            ("<5k DAU".to_string(), did_break)
+        }
     }
 }
 
