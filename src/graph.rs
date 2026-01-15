@@ -290,25 +290,25 @@ fn draw_url_panel(
         chart_bottom,
     )?;
 
-    // Draw left y-axis (error rate %)
+    // Draw left y-axis (p99 latency ms)
     draw_y_axis_left(
         root,
         chart_left,
         chart_top,
         chart_bottom,
-        &error_y_range,
-        ERROR_COLOR,
+        &p99_y_range,
+        P99_COLOR,
         side_padding,
     )?;
 
-    // Draw right y-axis (p99 latency ms)
+    // Draw right y-axis (error rate %)
     draw_y_axis_right(
         root,
         chart_right,
         chart_top,
         chart_bottom,
-        &p99_y_range,
-        P99_COLOR,
+        &error_y_range,
+        ERROR_COLOR,
         total_width as i32 - side_padding,
     )?;
 
@@ -661,7 +661,7 @@ fn draw_error_data_line(
     Ok(())
 }
 
-/// Draw left y-axis with labels
+/// Draw left y-axis with labels (p99 latency)
 fn draw_y_axis_left(
     root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
     chart_left: i32,
@@ -684,23 +684,19 @@ fn draw_y_axis_left(
         let value = range.start + ratio * range_size;
         let y = bottom - (ratio * chart_height) as i32;
 
-        let label = if value < 10.0 {
-            format!("{:.1}%", value)
-        } else {
-            format!("{:.0}%", value)
-        };
+        let label = format_latency_short(value);
 
         root.draw(&Text::new(label, (chart_left - 10, y), label_style.clone()))?;
     }
 
-    // Draw axis label - "Error %"
+    // Draw axis label - "p99"
     let axis_label_style = TextStyle::from(("sans-serif", 24).into_font())
         .color(&color)
         .pos(Pos::new(HPos::Center, VPos::Center));
 
     let mid_y = (top + bottom) / 2;
     root.draw(&Text::new(
-        "Error %",
+        "p99",
         (side_padding + 10, mid_y),
         axis_label_style,
     ))?;
@@ -708,7 +704,7 @@ fn draw_y_axis_left(
     Ok(())
 }
 
-/// Draw right y-axis with labels
+/// Draw right y-axis with labels (error rate %)
 fn draw_y_axis_right(
     root: &DrawingArea<BitMapBackend, plotters::coord::Shift>,
     chart_right: i32,
@@ -731,7 +727,11 @@ fn draw_y_axis_right(
         let value = range.start + ratio * range_size;
         let y = bottom - (ratio * chart_height) as i32;
 
-        let label = format_latency_short(value);
+        let label = if value < 10.0 {
+            format!("{:.1}%", value)
+        } else {
+            format!("{:.0}%", value)
+        };
         root.draw(&Text::new(
             label,
             (chart_right + 10, y),
@@ -739,14 +739,14 @@ fn draw_y_axis_right(
         ))?;
     }
 
-    // Draw axis label - "p99"
+    // Draw axis label - "Error %"
     let axis_label_style = TextStyle::from(("sans-serif", 24).into_font())
         .color(&color)
         .pos(Pos::new(HPos::Center, VPos::Center));
 
     let mid_y = (top + bottom) / 2;
     root.draw(&Text::new(
-        "p99",
+        "Error %",
         (right_edge - 30, mid_y),
         axis_label_style,
     ))?;
@@ -850,32 +850,16 @@ fn draw_legend(
     let legend_y = (height - 40) as i32;
     let left_x = 60i32;
 
-    // Left side: Error rate and p99 legend items
-    let error_line_start = left_x;
-    root.draw(&PathElement::new(
-        vec![
-            (error_line_start, legend_y),
-            (error_line_start + 40, legend_y),
-        ],
-        ERROR_COLOR.stroke_width(4),
-    ))?;
-
-    let label_style = TextStyle::from(("sans-serif", 22).into_font())
-        .color(&BLACK)
-        .pos(Pos::new(HPos::Left, VPos::Center));
-    root.draw(&Text::new(
-        "Error Rate",
-        (error_line_start + 50, legend_y),
-        label_style.clone(),
-    ))?;
-
-    // P99 latency legend item with threshold (next to error rate)
-    let p99_line_start = left_x + 240;
+    // Left side: P99 latency legend items
+    let p99_line_start = left_x;
     root.draw(&PathElement::new(
         vec![(p99_line_start, legend_y), (p99_line_start + 40, legend_y)],
         P99_COLOR.stroke_width(4),
     ))?;
 
+    let label_style = TextStyle::from(("sans-serif", 22).into_font())
+        .color(&P99_COLOR)
+        .pos(Pos::new(HPos::Left, VPos::Center));
     root.draw(&Text::new(
         "p99 Latency",
         (p99_line_start + 50, legend_y),
@@ -883,7 +867,7 @@ fn draw_legend(
     ))?;
 
     // P99 threshold legend item (dotted line + "3s max")
-    let p99_threshold_start = left_x + 440;
+    let p99_threshold_start = left_x + 200;
     let dash_style = ShapeStyle {
         color: P99_COLOR.mix(0.6).to_rgba(),
         filled: false,
@@ -916,17 +900,13 @@ fn draw_legend(
         .color(&P99_COLOR)
         .pos(Pos::new(HPos::Left, VPos::Center));
     root.draw(&Text::new(
-        "3s max acceptable",
+        "3s Max Acceptable",
         (p99_threshold_start + 50, legend_y),
         threshold_text_style,
     ))?;
 
-    // Right side: Threshold lines with their descriptions
-    // Layout: [--- 0.1% Payment] [--- 0.5% Core] [--- 1% APIs] [--- 2% Non-critical]
-    let threshold_label_style = TextStyle::from(("sans-serif", 20).into_font())
-        .color(&RGBColor(80, 80, 80))
-        .pos(Pos::new(HPos::Left, VPos::Center));
-
+    // Right side: Error Rate (solid) + Threshold lines with their descriptions
+    // Layout: [--- Error Rate] [--- 0.1% Payment] [--- 0.5% Core] [--- 1% APIs] [--- 2% Non-critical]
     let right_x = (width - 60) as i32;
     let mut x_pos = right_x;
 
@@ -934,28 +914,28 @@ fn draw_legend(
     // Reverse order: 2%, 1%, 0.5%, 0.1%
     let thresholds_reversed: Vec<_> = ERROR_THRESHOLDS.iter().rev().collect();
 
-    for &(threshold, label, color) in &thresholds_reversed {
+    for &(threshold, label_text, color) in &thresholds_reversed {
         // Format: "X% Label"
         let text = format!(
             "{}% {}",
             threshold,
-            label
+            label_text
                 .split('(')
                 .nth(1)
-                .unwrap_or(label)
+                .unwrap_or(label_text)
                 .trim_end_matches(')')
         );
         let text_width = (text.len() as i32) * 12; // Approximate width (2x)
         let line_width = 30i32;
         let spacing = 30i32;
 
-        // Draw label (right-aligned)
+        // Draw label with threshold color
+        let threshold_label_style = TextStyle::from(("sans-serif", 20).into_font())
+            .color(&color)
+            .pos(Pos::new(HPos::Left, VPos::Center));
+
         let label_x = x_pos - text_width;
-        root.draw(&Text::new(
-            text,
-            (label_x, legend_y),
-            threshold_label_style.clone(),
-        ))?;
+        root.draw(&Text::new(text, (label_x, legend_y), threshold_label_style))?;
 
         // Draw dashed line segment before label
         let line_end = label_x - 10;
@@ -983,19 +963,29 @@ fn draw_legend(
         x_pos = line_start - spacing;
     }
 
-    // Add "Acceptable Error Rates" heading centered above threshold items
-    let leftmost_x = x_pos + 30; // Adjust for the last spacing subtracted
-    let heading_center_x = (leftmost_x + right_x) / 2;
-    let heading_y = legend_y - 28;
+    // Add Error Rate (solid red line) as the leftmost item in the error rates group
+    let error_text = "Error Rate";
+    let error_text_width = (error_text.len() as i32) * 12;
+    let error_line_width = 30i32;
 
-    let heading_style = TextStyle::from(("sans-serif", 18).into_font())
-        .color(&RGBColor(120, 120, 120))
-        .pos(Pos::new(HPos::Center, VPos::Center));
+    let error_label_style = TextStyle::from(("sans-serif", 20).into_font())
+        .color(&ERROR_COLOR)
+        .pos(Pos::new(HPos::Left, VPos::Center));
 
+    let error_label_x = x_pos - error_text_width;
     root.draw(&Text::new(
-        "Acceptable Error Rates",
-        (heading_center_x, heading_y),
-        heading_style,
+        error_text,
+        (error_label_x, legend_y),
+        error_label_style,
+    ))?;
+
+    // Draw solid line segment before label
+    let error_line_end = error_label_x - 10;
+    let error_line_start = error_line_end - error_line_width;
+
+    root.draw(&PathElement::new(
+        vec![(error_line_start, legend_y), (error_line_end, legend_y)],
+        ERROR_COLOR.stroke_width(4),
     ))?;
 
     Ok(())
