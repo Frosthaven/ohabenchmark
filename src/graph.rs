@@ -318,7 +318,7 @@ fn draw_url_panel(
         .iter()
         .map(|r| r.target_rate as f64)
         .collect();
-    let plot_labels_y = chart_bottom + 6;
+    let plot_labels_y = chart_bottom + 12;
     draw_plot_point_labels(
         root,
         chart_left,
@@ -1089,7 +1089,7 @@ fn calculate_dau_estimate(url_result: &UrlBenchmarkResults) -> (String, bool) {
 
             let estimate = if did_break {
                 format!(
-                    "~{}-{} DAU",
+                    "~{} - {} DAU",
                     format_short_number(dau_low),
                     format_short_number(dau_high)
                 )
