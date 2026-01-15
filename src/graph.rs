@@ -319,7 +319,7 @@ fn draw_url_panel(
         .iter()
         .map(|r| r.target_rate as f64)
         .collect();
-    let plot_labels_y = chart_bottom + 12;
+    let plot_labels_y = chart_bottom + 15;
     draw_plot_point_labels(
         root,
         chart_left,
@@ -330,7 +330,7 @@ fn draw_url_panel(
     )?;
 
     // Draw business scale labels below the plot point labels
-    let business_scale_y = chart_bottom + 28;
+    let business_scale_y = chart_bottom + 31;
     draw_business_scales(root, chart_left, chart_right, business_scale_y, x_range)?;
 
     Ok(())
@@ -804,13 +804,11 @@ fn draw_plot_point_labels(
         // Calculate x position
         let x = chart_left + (((rate - x_range.start) / x_size) * chart_width) as i32;
 
-        // Format the label
+        // Format the label - always whole numbers
         let label = if rate >= 1000.0 {
-            format!("{:.1}k", rate / 1000.0)
-        } else if rate >= 100.0 {
-            format!("{:.0}", rate)
+            format!("{:.0}k", rate / 1000.0)
         } else {
-            format!("{:.1}", rate)
+            format!("{:.0}", rate)
         };
 
         root.draw(&Text::new(label, (x, label_y), label_style.clone()))?;
