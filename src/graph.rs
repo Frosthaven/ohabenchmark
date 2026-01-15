@@ -3,6 +3,7 @@ use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
 use crate::analysis::{BreakReason, StepStatus};
+use crate::config::ThresholdConfig;
 use crate::output::UrlBenchmarkResults;
 
 /// Error rate line color (red)
@@ -45,6 +46,7 @@ const DAU_PER_RPS_HIGH: f64 = 15_000.0;
 pub fn generate_error_rate_graph(
     url_results: &[UrlBenchmarkResults],
     output_path: &str,
+    thresholds: &ThresholdConfig,
 ) -> Result<()> {
     if url_results.is_empty() {
         return Ok(());
@@ -73,7 +75,7 @@ pub fn generate_error_rate_graph(
     let x_range = 0.0..(x_max * 1.05);
 
     // Calculate shared y-axis ranges for normalized comparison across all URLs
-    let (error_y_range, p99_y_range) = calculate_shared_y_ranges(url_results);
+    let (error_y_range, p99_y_range) = calculate_shared_y_ranges(url_results, thresholds);
 
     // Draw main title
     let title_style = TextStyle::from(("sans-serif", 48).into_font())
@@ -1042,6 +1044,7 @@ fn calculate_y_ranges(url_result: &UrlBenchmarkResults) -> (f64, f64) {
 /// Calculate shared y-axis ranges across all URL results for normalized comparison
 fn calculate_shared_y_ranges(
     url_results: &[UrlBenchmarkResults],
+    thresholds: &ThresholdConfig,
 ) -> (std::ops::Range<f64>, std::ops::Range<f64>) {
     let mut max_error_rate = 0f64;
     let mut max_p99 = 0f64;
@@ -1052,9 +1055,12 @@ fn calculate_shared_y_ranges(
         max_p99 = max_p99.max(p99);
     }
 
-    // Fixed y-axis ranges: error rate 0-100%, p99 0-5s
-    let error_y_range = 0f64..100.0;
-    let p99_y_range = 0f64..5000.0;
+    // Fixed y-axis ranges: error rate 0-50% (or threshold if smaller), p99 0-4s (or threshold if smaller)
+    let error_cap = 50.0_f64.min(thresholds.max_error_rate);
+    let p99_cap = 4000.0_f64.min(thresholds.max_p99_ms as f64);
+
+    let error_y_range = 0f64..error_cap;
+    let p99_y_range = 0f64..p99_cap;
 
     (error_y_range, p99_y_range)
 }

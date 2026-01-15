@@ -259,7 +259,7 @@ fn run_benchmark_suite(config: &BenchmarkConfig, state: &mut SessionState) -> Re
         }
 
         // Generate PNG graph
-        match graph::generate_error_rate_graph(&all_url_results, &png_path) {
+        match graph::generate_error_rate_graph(&all_url_results, &png_path, &config.thresholds) {
             Ok(_) => {
                 println!("{} Graph saved to: {}", style("✓").green(), png_path);
             }
