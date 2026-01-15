@@ -832,40 +832,23 @@ fn draw_business_scales(
         .color(&SCALE_COLOR)
         .pos(Pos::new(HPos::Center, VPos::Top));
 
-    for &(min_rate, max_rate, label) in BUSINESS_SCALES {
-        // Skip if this scale is entirely outside our x-range
-        if min_rate >= x_range.end {
-            continue;
-        }
-        if max_rate != f64::MAX && max_rate <= x_range.start {
-            continue;
-        }
-
-        // Clamp to visible range
-        let visible_min = min_rate.max(x_range.start);
-        let visible_max = if max_rate == f64::MAX {
-            x_range.end
-        } else {
-            max_rate.min(x_range.end)
-        };
-
-        // Skip if range is too small to be meaningful
-        if visible_max <= visible_min {
+    // Draw labels at the boundary lines between scales
+    // Each boundary is the max_rate of one scale (and min_rate of the next)
+    for &(_, max_rate, label) in BUSINESS_SCALES {
+        // Skip the last scale (Global) which has no upper boundary
+        if max_rate == f64::MAX {
             continue;
         }
 
-        // Convert to pixel positions
-        let x_start = chart_left + (((visible_min - x_range.start) / x_size) * chart_width) as i32;
-        let x_end = chart_left + (((visible_max - x_range.start) / x_size) * chart_width) as i32;
-
-        // Skip if the rendered width is too small for the label
-        let min_width = 80i32;
-        if x_end - x_start < min_width {
+        // Skip if boundary is outside visible range
+        if max_rate <= x_range.start || max_rate >= x_range.end {
             continue;
         }
 
-        // Draw label centered in the category range
-        let label_x = (x_start + x_end) / 2;
+        // Convert boundary to pixel position
+        let label_x = chart_left + (((max_rate - x_range.start) / x_size) * chart_width) as i32;
+
+        // Draw label centered on the boundary line
         root.draw(&Text::new(label, (label_x, label_y), label_style.clone()))?;
     }
 
